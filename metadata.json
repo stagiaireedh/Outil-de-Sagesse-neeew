@@ -1,0 +1,6 @@
+{
+  "name": "Écosystèmes Dialogue État-OSC Bénin",
+  "description": "Outil d'évaluation et d'auto-évaluation des écosystèmes sectoriels de dialogue État-OSC - Projet BEN/301 ASCB Bénin",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
