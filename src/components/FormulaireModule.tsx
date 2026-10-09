@@ -97,8 +97,7 @@ export const FormulaireModule: React.FC<FormulaireModuleProps> = ({ moduleCode, 
     setIsNewSubmissionMode(true);
     setExistingSubmission(null);
     setValidationErrorMsg(null);
-    localStorage.removeItem(`draft_${secteur.slug}_${moduleCode}`);
-    localStorage.removeItem(`draft_id_${secteur.slug}_${moduleCode}`);
+    removeLocalSubmissionForModule(secteur.slug, moduleCode);
   };
 
   useEffect(() => {
@@ -552,9 +551,24 @@ export const FormulaireModule: React.FC<FormulaireModuleProps> = ({ moduleCode, 
             </span>
           </div>
           <p className="text-xs text-amber-900 leading-relaxed">
-            Votre évaluation pour l'organisation <strong>{existingSubmission?.nom_organisation}</strong> par <strong>{existingSubmission?.nom_repondant}</strong> a été enregistrée le {new Date(existingSubmission!.date_creation).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}. Seul l'administrateur peut la débloquer depuis l'espace d'administration.
+            Votre évaluation pour l'organisation <strong>{existingSubmission?.nom_organisation}</strong> par <strong>{existingSubmission?.nom_repondant}</strong> a été enregistrée le {new Date(existingSubmission!.date_creation).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}.
           </p>
+          {syncNotice && (
+            <div className="p-3 rounded-xl bg-amber-100/80 border border-amber-300 text-amber-950 text-xs font-semibold">
+              {syncNotice}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={handleCheckUnlock}
+              disabled={isCheckingAgain}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs shadow-xs transition cursor-pointer disabled:opacity-50"
+              title="Vérifier si l'administrateur a supprimé ou débloqué cette évaluation"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${isCheckingAgain ? 'animate-spin' : ''}`} />
+              <span>{isCheckingAgain ? 'Vérification...' : "Vérifier si l'accès a été débloqué"}</span>
+            </button>
             <button
               type="button"
               onClick={reinitialiserPourNouvelleSoumission}

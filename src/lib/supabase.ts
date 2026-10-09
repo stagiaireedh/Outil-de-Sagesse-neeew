@@ -853,9 +853,9 @@ export async function syncPendingLocalSubmissions(): Promise<{ syncedCount: numb
  * Check if a submission already exists in Supabase for a sector and module code.
  *
  * THE SINGLE SOURCE OF TRUTH IS SUPABASE:
- * - If Supabase has an active completed submission: returns it so the form is locked.
- * - If Supabase has NO completed submission (or if deleted/unlocked by admin):
- *   returns null so the participant has full access to fill and submit!
+ * - If Supabase has an active completed submission for this user/device: returns it so the form is locked.
+ * - If Supabase has NO completed submission (or if deleted/unlocked by the admin):
+ *   automatically purges stale local keys and returns null so the participant can immediately fill and submit!
  */
 export async function getExistingSubmission(
   secteurSlug: string,
@@ -881,49 +881,57 @@ export async function getExistingSubmission(
         .eq('statut', 'complete')
         .limit(1);
 
-      if (!error && data && data.length > 0) {
-        const row = data[0];
-        let reponsesMap = mapRowsToReponses(row.reponses);
-        if (Object.keys(reponsesMap).length === 0) {
-          const localMatch = getLocalSoumissions().find((s) => s.id === submittedId);
-          if (localMatch?.reponses && Object.keys(localMatch.reponses).length > 0) {
-            reponsesMap = localMatch.reponses;
+      if (!error) {
+        if (data && data.length > 0) {
+          const row = data[0];
+          let reponsesMap = mapRowsToReponses(row.reponses);
+          if (Object.keys(reponsesMap).length === 0) {
+            const localMatch = getLocalSoumissions().find((s) => s.id === submittedId);
+            if (localMatch?.reponses && Object.keys(localMatch.reponses).length > 0) {
+              reponsesMap = localMatch.reponses;
+            }
           }
+          const syntheseRow = Array.isArray(row.syntheses) && row.syntheses.length > 0 ? row.syntheses[0] : null;
+
+          const soum: Soumission = {
+            id: row.id,
+            session_id: row.session_id,
+            secteur_id: row.secteur_id,
+            secteur_slug: (row.secteur_slug || UUID_TO_SECTEUR_SLUG[row.secteur_id] || secteurSlug) as SectorSlug,
+            module_code: row.module_code || moduleCode,
+            nom_repondant: row.nom_repondant,
+            nom_organisation: row.nom_organisation,
+            email: row.email || '',
+            fonction: row.fonction || '',
+            organisations_evaluees: row.organisations_evaluees || '',
+            statut: row.statut || 'complete',
+            date_creation: row.date_creation,
+            date_maj: row.date_maj || row.date_creation,
+            reponses: reponsesMap,
+            synthese: syntheseRow
+              ? {
+                  forces: syntheseRow.forces || '',
+                  fragilites: syntheseRow.fragilites || ''
+                }
+              : undefined,
+            observations_criteres: row.observations_criteres || {}
+          };
+
+          return soum;
+        } else {
+          // L'ADMIN A SUPPRIMÉ OU DÉBLOQUÉ CETTE ÉVALUATION SUR SUPABASE !
+          // On purge immédiatement le localStorage de cet appareil pour redonner la main au répondant.
+          console.info(`[DÉBLOCAGE] Évaluation ${submittedId} absente de Supabase (supprimée par l'administrateur). Accès réactivé pour ${normalizedSlug} - ${moduleCode}.`);
+          removeLocalSubmissionForModule(normalizedSlug, moduleCode);
+          return null;
         }
-        const syntheseRow = Array.isArray(row.syntheses) && row.syntheses.length > 0 ? row.syntheses[0] : null;
-
-        const soum: Soumission = {
-          id: row.id,
-          session_id: row.session_id,
-          secteur_id: row.secteur_id,
-          secteur_slug: (row.secteur_slug || UUID_TO_SECTEUR_SLUG[row.secteur_id] || secteurSlug) as SectorSlug,
-          module_code: row.module_code || moduleCode,
-          nom_repondant: row.nom_repondant,
-          nom_organisation: row.nom_organisation,
-          email: row.email || '',
-          fonction: row.fonction || '',
-          organisations_evaluees: row.organisations_evaluees || '',
-          statut: row.statut || 'complete',
-          date_creation: row.date_creation,
-          date_maj: row.date_maj || row.date_creation,
-          reponses: reponsesMap,
-          synthese: syntheseRow
-            ? {
-                forces: syntheseRow.forces || '',
-                fragilites: syntheseRow.fragilites || ''
-              }
-            : undefined,
-          observations_criteres: row.observations_criteres || {}
-        };
-
-        return soum;
       }
     } catch (e) {
       console.warn('Erreur vérification soumission Supabase:', e);
     }
   }
 
-  // Fallback to local storage if offline for this submittedId
+  // En cas d'absence totale de réseau, repli sur le stockage local
   const localList = getLocalSoumissions();
   const localMatch = localList.find((s) => s.id === submittedId && s.statut === 'complete');
   if (localMatch) return localMatch;
@@ -946,8 +954,8 @@ export async function deleteSoumission(id: string): Promise<{ success: boolean; 
       const parts = id.replace('brouillon_', '').split('_');
       const secteurSlug = parts[0];
       const moduleCode = parts[1];
-      localStorage.removeItem(`draft_${secteurSlug}_${moduleCode}`);
-      localStorage.removeItem(`draft_id_${secteurSlug}_${moduleCode}`);
+      removeLocalSubmissionForModule(secteurSlug, moduleCode);
+
       const client = getSupabaseClient();
       if (client) {
         const secteurUuid = SECTEUR_UUIDS[secteurSlug];
@@ -961,20 +969,33 @@ export async function deleteSoumission(id: string): Promise<{ success: boolean; 
       return { success: true };
     }
 
-    // 2. Remove from local storage
+    // 2. Identifier le secteur et le module pour purger le verrouillage local
     const localList = getLocalSoumissions();
     const target = localList.find((s) => s.id === id);
-    const updated = localList.filter((s) => s.id !== id);
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
 
-    if (target) {
-      localStorage.removeItem(`draft_${target.secteur_slug}_${target.module_code}`);
-      localStorage.removeItem(`draft_id_${target.secteur_slug}_${target.module_code}`);
-    }
+    let targetSecteurSlug = target?.secteur_slug;
+    let targetModuleCode = target?.module_code;
 
     // 3. Remove from Supabase if configured
     const client = getSupabaseClient();
     if (client) {
+      // Récupérer le secteur_slug et module_code si non trouvés localement
+      if (!targetSecteurSlug || !targetModuleCode) {
+        try {
+          const { data: remoteData } = await client
+            .from('soumissions')
+            .select('secteur_slug, module_code')
+            .eq('id', id)
+            .limit(1);
+          if (remoteData && remoteData.length > 0) {
+            targetSecteurSlug = remoteData[0].secteur_slug;
+            targetModuleCode = remoteData[0].module_code;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
       await client.from('reponses').delete().eq('soumission_id', id);
       await client.from('syntheses').delete().eq('soumission_id', id);
       const { error } = await client.from('soumissions').delete().eq('id', id);
@@ -982,6 +1003,14 @@ export async function deleteSoumission(id: string): Promise<{ success: boolean; 
         console.warn('Supabase delete error:', error.message);
         return { success: false, error: error.message };
       }
+    }
+
+    // 4. Purger toutes les clés locales associées
+    const updated = localList.filter((s) => s.id !== id);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
+
+    if (targetSecteurSlug && targetModuleCode) {
+      removeLocalSubmissionForModule(targetSecteurSlug, targetModuleCode);
     }
 
     return { success: true };
@@ -1000,19 +1029,22 @@ export async function unlockSectorModule(
   moduleCode: string
 ): Promise<{ success: boolean; message: string }> {
   try {
-    // 1. Clear locally
-    removeLocalSubmissionForModule(secteurSlug, moduleCode);
+    const normalizedSlug = (secteurSlug || 'eau').toLowerCase();
 
-    // 2. Clear on Supabase
+    // 1. Purge locale immédiate
+    removeLocalSubmissionForModule(normalizedSlug, moduleCode);
+
+    // 2. Purge sur Supabase
     const client = getSupabaseClient();
     if (client) {
-      const secteurUuid = SECTEUR_UUIDS[secteurSlug];
-      // Find IDs to delete
+      const secteurUuid = SECTEUR_UUIDS[normalizedSlug] || SECTEUR_UUIDS['eau'];
+
+      // Trouver toutes les soumissions correspondantes
       const { data: rows } = await client
         .from('soumissions')
         .select('id')
-        .or(`secteur_slug.eq.${secteurSlug},secteur_id.eq.${secteurUuid}`)
-        .eq('module_code', moduleCode);
+        .eq('module_code', moduleCode)
+        .or(`secteur_slug.eq.${normalizedSlug},secteur_id.eq.${secteurUuid}`);
 
       if (rows && rows.length > 0) {
         for (const r of rows) {
@@ -1025,7 +1057,7 @@ export async function unlockSectorModule(
 
     return {
       success: true,
-      message: `L'accès au Module ${moduleCode} pour le secteur ${secteurSlug.toUpperCase()} a été réinitialisé avec succès. Les participants peuvent à nouveau soumettre.`
+      message: `L'accès au Module ${moduleCode} pour le secteur ${normalizedSlug.toUpperCase()} a été réinitialisé avec succès. Les participants peuvent immédiatement remplir à nouveau le formulaire.`
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Erreur';
